@@ -3,7 +3,11 @@ from flask import Flask, render_template, request, jsonify
 app=Flask(__name__)
 MODEL=os.path.join(os.path.dirname(__file__),'fraud_model.joblib')
 ART=joblib.load(MODEL) if os.path.exists(MODEL) else None
-
+if ART is not None:
+    try:
+        ART["model"].named_steps["model"].n_jobs = 1
+    except (KeyError, AttributeError):
+        pass
 def prepare(d):
     x=d.copy();x['hourOfDay']=(x.step-1)%24;x['day']=(x.step-1)//24+1;x['isNight']=x.hourOfDay.between(0,5).astype('int8');x['logAmount']=np.log1p(x.amount)
     x['origBalanceDelta']=x.newbalanceOrig-x.oldbalanceOrg;x['destBalanceDelta']=x.newbalanceDest-x.oldbalanceDest
