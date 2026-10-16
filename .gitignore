@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+Fraude.csv
+fraud_model_anterior.joblib
+.env
+.DS_Store
