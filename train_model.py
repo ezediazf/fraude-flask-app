@@ -1,3 +1,12 @@
+import gc
+import os
+
+# Limitar el paralelismo de las librerías numéricas.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -16,30 +25,47 @@ MODEL_PATH = "fraud_model.joblib"
 def create_features(data):
     df = data.copy()
 
-    # Columnas que no deben utilizarse
+    # Eliminar índice exportado y variable prohibida.
     df = df.drop(
-        columns=["Unnamed: 0", "isFlaggedFraud"],
+        columns=[
+            "Unnamed: 0",
+            "isFlaggedFraud"
+        ],
         errors="ignore"
     )
 
-    # Variables temporales
-    df["hourOfDay"] = (df["step"] - 1) % 24
-    df["day"] = ((df["step"] - 1) // 24) + 1
-    df["isNight"] = df["hourOfDay"].between(0, 5).astype("int8")
+    # Variables temporales.
+    df["hourOfDay"] = (
+        df["step"] - 1
+    ) % 24
 
-    # Transformación del monto
-    df["logAmount"] = np.log1p(df["amount"])
+    df["day"] = (
+        (df["step"] - 1) // 24
+    ) + 1
 
-    # Variaciones de saldos
+    df["isNight"] = (
+        df["hourOfDay"]
+        .between(0, 5)
+        .astype("int8")
+    )
+
+    # Transformación del monto.
+    df["logAmount"] = np.log1p(
+        df["amount"]
+    )
+
+    # Variaciones de saldo.
     df["origBalanceDelta"] = (
-        df["newbalanceOrig"] - df["oldbalanceOrg"]
+        df["newbalanceOrig"]
+        - df["oldbalanceOrg"]
     )
 
     df["destBalanceDelta"] = (
-        df["newbalanceDest"] - df["oldbalanceDest"]
+        df["newbalanceDest"]
+        - df["oldbalanceDest"]
     )
 
-    # Saldos esperados según tipo de transacción
+    # Saldos esperados.
     expected_origin = np.where(
         df["type"].eq("CASH_IN"),
         df["oldbalanceOrg"] + df["amount"],
@@ -52,27 +78,43 @@ def create_features(data):
         df["oldbalanceDest"] + df["amount"]
     )
 
-    # Errores o inconsistencias contables
+    # Errores o inconsistencias contables.
     df["origBalanceError"] = (
-        df["newbalanceOrig"] - expected_origin
+        df["newbalanceOrig"]
+        - expected_origin
     )
 
     df["destBalanceError"] = (
-        df["newbalanceDest"] - expected_destination
+        df["newbalanceDest"]
+        - expected_destination
     )
 
-    # Indicadores de saldos iguales a cero
-    zero_columns = {
-        "origZeroBefore": "oldbalanceOrg",
-        "origZeroAfter": "newbalanceOrig",
-        "destZeroBefore": "oldbalanceDest",
-        "destZeroAfter": "newbalanceDest"
-    }
+    # Indicadores de saldos iguales a cero.
+    df["origZeroBefore"] = (
+        df["oldbalanceOrg"]
+        .eq(0)
+        .astype("int8")
+    )
 
-    for new_column, source_column in zero_columns.items():
-        df[new_column] = df[source_column].eq(0).astype("int8")
+    df["origZeroAfter"] = (
+        df["newbalanceOrig"]
+        .eq(0)
+        .astype("int8")
+    )
 
-    # Prefijo del destinatario
+    df["destZeroBefore"] = (
+        df["oldbalanceDest"]
+        .eq(0)
+        .astype("int8")
+    )
+
+    df["destZeroAfter"] = (
+        df["newbalanceDest"]
+        .eq(0)
+        .astype("int8")
+    )
+
+    # Sólo se conserva el prefijo del destinatario.
     df["destPrefix"] = (
         df["nameDest"]
         .astype(str)
@@ -80,258 +122,328 @@ def create_features(data):
         .fillna("U")
     )
 
-    # Ratios monto/saldo
+    # Relaciones entre monto y saldo.
     df["amountToOrigBalance"] = (
-        df["amount"] / (df["oldbalanceOrg"].abs() + 1)
+        df["amount"]
+        / (
+            df["oldbalanceOrg"].abs()
+            + 1.0
+        )
     )
 
     df["amountToDestBalance"] = (
-        df["amount"] / (df["oldbalanceDest"].abs() + 1)
+        df["amount"]
+        / (
+            df["oldbalanceDest"].abs()
+            + 1.0
+        )
     )
 
-    return df
+    # Estrategia liviana para el despliegue web.
+    # No se guardan diccionarios de cuentas.
+    df["origFrequency"] = 0.0
+    df["destFrequency"] = 0.0
 
-
-def add_identifier_frequencies(
-    data,
-    origin_frequency,
-    destination_frequency
-):
-    df = data.copy()
-
-    df["origFrequency"] = (
-        df["nameOrig"]
-        .map(origin_frequency)
-        .fillna(0)
-    )
-
-    df["destFrequency"] = (
-        df["nameDest"]
-        .map(destination_frequency)
-        .fillna(0)
-    )
-
+    # Eliminar identificadores crudos.
     return df.drop(
-        columns=["nameOrig", "nameDest"],
+        columns=[
+            "nameOrig",
+            "nameDest"
+        ],
         errors="ignore"
     )
 
 
-print("Cargando dataset...")
+def validate_dataset(data):
+    required_columns = {
+        "step",
+        "type",
+        "amount",
+        "nameOrig",
+        "oldbalanceOrg",
+        "newbalanceOrig",
+        "nameDest",
+        "oldbalanceDest",
+        "newbalanceDest",
+        "isFraud"
+    }
 
-raw = pd.read_csv(DATASET_PATH)
-
-required_columns = {
-    "step",
-    "type",
-    "amount",
-    "nameOrig",
-    "oldbalanceOrg",
-    "newbalanceOrig",
-    "nameDest",
-    "oldbalanceDest",
-    "newbalanceDest",
-    "isFraud"
-}
-
-missing_columns = required_columns.difference(raw.columns)
-
-if missing_columns:
-    raise ValueError(
-        "Faltan columnas requeridas en Fraude.csv: "
-        + ", ".join(sorted(missing_columns))
+    missing_columns = required_columns.difference(
+        data.columns
     )
 
-if raw["isFraud"].nunique() < 2:
-    raise ValueError(
-        "La variable isFraud contiene una sola clase. "
-        "No es posible entrenar un clasificador binario."
-    )
-
-print("Creando variables derivadas...")
-
-data = create_features(raw)
-
-# División temporal
-train = data[data["step"] <= 405].copy()
-
-validation = data[
-    data["step"].between(406, 548)
-].copy()
-
-if train.empty:
-    raise ValueError("El conjunto de entrenamiento quedó vacío.")
-
-if validation.empty:
-    raise ValueError("El conjunto de validación quedó vacío.")
-
-if train["isFraud"].nunique() < 2:
-    raise ValueError(
-        "El bloque de entrenamiento no contiene ambas clases."
-    )
-
-if validation["isFraud"].nunique() < 2:
-    raise ValueError(
-        "El bloque de validación no contiene ambas clases."
-    )
-
-print("Calculando frecuencias de identificadores...")
-
-origin_frequency = train["nameOrig"].value_counts(
-    normalize=True
-)
-
-destination_frequency = train["nameDest"].value_counts(
-    normalize=True
-)
-
-train = add_identifier_frequencies(
-    train,
-    origin_frequency,
-    destination_frequency
-)
-
-validation = add_identifier_frequencies(
-    validation,
-    origin_frequency,
-    destination_frequency
-)
-
-features = [
-    column
-    for column in train.columns
-    if column != "isFraud"
-]
-
-categorical_features = [
-    "type",
-    "destPrefix"
-]
-
-numeric_features = [
-    column
-    for column in features
-    if column not in categorical_features
-]
-
-preprocessor = ColumnTransformer(
-    transformers=[
-        (
-            "numeric",
-            RobustScaler(),
-            numeric_features
-        ),
-        (
-            "categorical",
-            OneHotEncoder(
-                handle_unknown="ignore",
-                sparse_output=True
-            ),
-            categorical_features
-        )
-    ],
-    sparse_threshold=1.0
-)
-
-model = Pipeline(
-    steps=[
-        (
-            "preprocessor",
-            preprocessor
-        ),
-        (
-            "model",
-            LogisticRegression(
-                solver="liblinear",
-                penalty="l2",
-                class_weight="balanced",
-                max_iter=500,
-                random_state=42
+    if missing_columns:
+        raise ValueError(
+            "Faltan columnas requeridas: "
+            + ", ".join(
+                sorted(missing_columns)
             )
         )
+
+    if data["isFraud"].nunique() < 2:
+        raise ValueError(
+            "isFraud contiene una sola clase. "
+            "No se puede entrenar el modelo."
+        )
+
+
+def main():
+    if not os.path.exists(DATASET_PATH):
+        raise FileNotFoundError(
+            f"No se encontró {DATASET_PATH} "
+            "en la carpeta actual."
+        )
+
+    print("Cargando Fraude.csv...")
+
+    raw = pd.read_csv(
+        DATASET_PATH
+    )
+
+    validate_dataset(raw)
+
+    print("Creando variables derivadas...")
+
+    data = create_features(raw)
+
+    del raw
+    gc.collect()
+
+    # División temporal.
+    train = data[
+        data["step"] <= 405
+    ].copy()
+
+    validation = data[
+        data["step"].between(
+            406,
+            548
+        )
+    ].copy()
+
+    del data
+    gc.collect()
+
+    if train.empty:
+        raise ValueError(
+            "El conjunto de entrenamiento quedó vacío."
+        )
+
+    if validation.empty:
+        raise ValueError(
+            "El conjunto de validación quedó vacío."
+        )
+
+    if train["isFraud"].nunique() < 2:
+        raise ValueError(
+            "Train no contiene ambas clases."
+        )
+
+    if validation["isFraud"].nunique() < 2:
+        raise ValueError(
+            "Validación no contiene ambas clases."
+        )
+
+    features = [
+        column
+        for column in train.columns
+        if column != "isFraud"
     ]
-)
 
-# Muestra de entrenamiento controlada para reducir memoria
-positive_train = train[
-    train["isFraud"].eq(1)
-].copy()
+    categorical_features = [
+        "type",
+        "destPrefix"
+    ]
 
-negative_train = train[
-    train["isFraud"].eq(0)
-].copy()
+    numeric_features = [
+        column
+        for column in features
+        if column not in categorical_features
+    ]
 
-negative_sample_size = min(
-    len(negative_train),
-    len(positive_train) * 8
-)
-
-negative_sample = negative_train.sample(
-    n=negative_sample_size,
-    random_state=42
-)
-
-fit_data = pd.concat(
-    [positive_train, negative_sample],
-    ignore_index=True
-).sample(
-    frac=1,
-    random_state=42
-)
-
-print(
-    "Entrenando Regresión Logística con "
-    f"{len(fit_data):,} registros..."
-)
-
-model.fit(
-    fit_data[features],
-    fit_data["isFraud"]
-)
-
-print("Calculando umbral sobre validación...")
-
-validation_scores = model.predict_proba(
-    validation[features]
-)[:, 1]
-
-precision, recall, thresholds = precision_recall_curve(
-    validation["isFraud"],
-    validation_scores
-)
-
-f1_values = (
-    2 * precision * recall
-    / (precision + recall + 1e-12)
-)
-
-if len(thresholds) == 0:
-    threshold = 0.5
-else:
-    best_index = int(
-        np.nanargmax(f1_values[:-1])
-    )
-    threshold = float(
-        thresholds[best_index]
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "numeric",
+                RobustScaler(),
+                numeric_features
+            ),
+            (
+                "categorical",
+                OneHotEncoder(
+                    handle_unknown="ignore",
+                    sparse_output=True
+                ),
+                categorical_features
+            )
+        ],
+        sparse_threshold=1.0
     )
 
-artifact = {
-    "model": model,
-    "threshold": threshold,
-    "features": features,
-    "origin_frequency": origin_frequency.to_dict(),
-    "destination_frequency": destination_frequency.to_dict(),
-    "best_model": "Regresión Logística - versión web"
-}
+    model = Pipeline(
+        steps=[
+            (
+                "preprocessor",
+                preprocessor
+            ),
+            (
+                "model",
+                LogisticRegression(
+                    solver="liblinear",
+                    penalty="l2",
+                    class_weight="balanced",
+                    max_iter=500,
+                    random_state=42
+                )
+            )
+        ]
+    )
 
-print("Guardando modelo liviano...")
+    # Utilizar todos los fraudes y una muestra de ocho
+    # operaciones legítimas por cada fraude.
+    positive_train = train[
+        train["isFraud"].eq(1)
+    ].copy()
 
-joblib.dump(
-    artifact,
-    MODEL_PATH,
-    compress=9
-)
+    negative_train = train[
+        train["isFraud"].eq(0)
+    ]
 
-print("Modelo generado correctamente.")
-print(f"Archivo: {MODEL_PATH}")
-print(f"Umbral: {threshold:.6f}")
+    if positive_train.empty:
+        raise ValueError(
+            "Train no contiene casos de fraude."
+        )
+
+    negative_sample_size = min(
+        len(negative_train),
+        len(positive_train) * 8
+    )
+
+    negative_sample = negative_train.sample(
+        n=negative_sample_size,
+        random_state=42
+    ).copy()
+
+    fit_data = pd.concat(
+        [
+            positive_train,
+            negative_sample
+        ],
+        ignore_index=True
+    ).sample(
+        frac=1.0,
+        random_state=42
+    )
+
+    del positive_train
+    del negative_train
+    del negative_sample
+    del train
+
+    gc.collect()
+
+    print(
+        "Entrenando Regresión Logística con "
+        f"{len(fit_data):,} registros..."
+    )
+
+    model.fit(
+        fit_data[features],
+        fit_data["isFraud"]
+    )
+
+    del fit_data
+    gc.collect()
+
+    print(
+        "Seleccionando umbral con validación..."
+    )
+
+    validation_scores = model.predict_proba(
+        validation[features]
+    )[:, 1]
+
+    precision, recall, thresholds = (
+        precision_recall_curve(
+            validation["isFraud"],
+            validation_scores
+        )
+    )
+
+    if len(thresholds) == 0:
+        threshold = 0.5
+
+    else:
+        f1_values = (
+            2
+            * precision
+            * recall
+            / (
+                precision
+                + recall
+                + 1e-12
+            )
+        )
+
+        best_index = int(
+            np.nanargmax(
+                f1_values[:-1]
+            )
+        )
+
+        threshold = float(
+            thresholds[best_index]
+        )
+
+    del validation
+    del validation_scores
+    del precision
+    del recall
+    del thresholds
+
+    gc.collect()
+
+    # No guardar origin_frequency ni destination_frequency.
+    artifact = {
+        "model": model,
+        "threshold": threshold,
+        "features": features,
+        "best_model": (
+            "Regresion Logistica - version web liviana"
+        ),
+        "web_frequency_strategy": (
+            "origFrequency y destFrequency "
+            "se asignan a 0"
+        )
+    }
+
+    print(
+        "Guardando fraud_model.joblib..."
+    )
+
+    joblib.dump(
+        artifact,
+        MODEL_PATH,
+        compress=3
+    )
+
+    model_size_mb = (
+        os.path.getsize(MODEL_PATH)
+        / (1024 * 1024)
+    )
+
+    print(
+        "Modelo generado correctamente."
+    )
+
+    print(
+        f"Umbral: {threshold:.6f}"
+    )
+
+    print(
+        f"Tamaño: {model_size_mb:.2f} MB"
+    )
+
+
+if __name__ == "__main__":
+    main()
